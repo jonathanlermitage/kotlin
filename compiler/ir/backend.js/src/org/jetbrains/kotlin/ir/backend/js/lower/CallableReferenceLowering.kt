@@ -82,6 +82,10 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
             collectedReferenceMap[makeCallableKey(expression.getter!!.owner, expression)] = expression
         }
 
+        override fun visitLocalDelegatedPropertyReference(expression: IrLocalDelegatedPropertyReference) {
+            collectedReferenceMap[makeCallableKey(expression.getter!!.owner, expression)] = expression
+        }
+
         override fun visitElement(element: IrElement) {
             element.acceptChildrenVoid(this)
         }
@@ -107,10 +111,12 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
                     if (expression.symbol in declarationsSet) lowerKFunctionReference(expression.symbol.owner, expression) else emptyList()
 
                 override fun visitPropertyReference(expression: IrPropertyReference, data: Nothing?) =
-                    if (expression.getter in declarationsSet) lowerKPropertyReference(
-                        expression.getter!!.owner,
-                        expression
-                    ) else emptyList()
+                    if (expression.getter in declarationsSet) lowerKPropertyReference(expression) else emptyList()
+
+                override fun visitLocalDelegatedPropertyReference(
+                    expression: IrLocalDelegatedPropertyReference,
+                    data: Nothing?
+                ) = lowerKPropertyReference(expression)
             }, null)
         }
     }
@@ -126,6 +132,12 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
             return callableToGetterFunction[makeCallableKey(expression.getter!!.owner, expression)]?.let {
                 redirectToFunction(expression, it)
             } ?: expression
+        }
+
+        override fun visitLocalDelegatedPropertyReference(expression: IrLocalDelegatedPropertyReference): IrExpression {
+            return callableToGetterFunction[makeCallableKey(expression.getter!!.owner, expression)]!!.let {
+                redirectToFunction(expression, it)
+            }
         }
 
         private fun redirectToFunction(callable: IrCallableReference, newTarget: IrFunction) =
@@ -211,7 +223,17 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
         return additionalDeclarations + listOf(refGetFunction)
     }
 
-    private fun lowerKPropertyReference(getterDeclaration: IrFunction, propertyReference: IrPropertyReference): List<IrDeclaration> {
+    private fun lowerKPropertyReference(ref: IrPropertyReference) =
+        lowerKPropertyReference(ref.getter!!.owner, ref.setter?.owner, ref)
+
+    private fun lowerKPropertyReference(ref: IrLocalDelegatedPropertyReference) =
+        lowerKPropertyReference(ref.getter.owner, ref.setter?.owner, ref)
+
+    private fun lowerKPropertyReference(
+        getter: IrFunction,
+        setter: IrFunction?,
+        propertyReference: IrCallableReference
+    ): List<IrDeclaration> {
         // transform
         // x = Foo::bar ->
         // x = Foo_bar_KreferenceGet() : KPropertyN<Foo, PType> {
@@ -232,10 +254,10 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
         // }
 
         val getterName = createPropertyClosureGetterName(propertyReference.descriptor)
-        val refGetFunction = buildGetFunction(propertyReference.getter!!.owner, propertyReference, getterName)
+        val refGetFunction = buildGetFunction(getter, propertyReference, getterName)
 
-        val getterFunction = propertyReference.getter?.let { buildClosureFunction(it.owner, refGetFunction, propertyReference) }!!
-        val setterFunction = propertyReference.setter?.let { buildClosureFunction(it.owner, refGetFunction, propertyReference) }
+        val getterFunction = getter?.let { buildClosureFunction(it, refGetFunction, propertyReference) }
+        val setterFunction = setter?.let { buildClosureFunction(it, refGetFunction, propertyReference) }
 
         val additionalDeclarations = generateGetterBodyWithGuard(refGetFunction) {
             val statements = mutableListOf<IrStatement>()
@@ -273,7 +295,7 @@ class CallableReferenceLowering(val context: JsIrBackendContext) {
             Pair(statements, irVarSymbol)
         }
 
-        callableToGetterFunction[makeCallableKey(getterDeclaration, propertyReference)] = refGetFunction
+        callableToGetterFunction[makeCallableKey(getter, propertyReference)] = refGetFunction
 
         return additionalDeclarations + listOf(refGetFunction)
     }
